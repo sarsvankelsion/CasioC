@@ -1,0 +1,9 @@
+[package]
+name = "casio-asm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CasioC compiler: .csc (C-like) -> ROM injection bytes (580vnx/880btg)"
+keywords = ["casio", "compiler", "classwiz"]
+
+[dependencies]
