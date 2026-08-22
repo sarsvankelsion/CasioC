@@ -77,6 +77,9 @@ pub fn emit_asm(prog: &Program) -> Result<String, String> {
     for g in &prog.globals {
         let addr = if let Some(a) = g.addr {
             emitter.var_map.insert(g.name.clone(), a);
+            if a + 2 > emitter.next_ram_addr {
+                emitter.next_ram_addr = a + 2;
+            }
             a
         } else {
             emitter.get_or_alloc_var(&g.name)
@@ -181,19 +184,19 @@ fn emit_stmt(stmt: &Stmt, em: &mut AsmEmitter) -> Result<(), String> {
         Stmt::Call { name, args } => {
             let key = name.to_ascii_lowercase();
             match key.as_str() {
-                "screen_del" | "clear" | "buffer_clear" => {
+                "screen_del" | "clear" | "buffer_clear" | "cls" => {
                     em.out.push_str("buffer_clear\n");
                 }
                 "screen_fill" | "fill_screen" => {
                     em.out.push_str("fill_screen\n");
                 }
-                "render" | "render.ddd4" => {
+                "render" | "render.ddd4" | "flush" => {
                     em.out.push_str("render.ddd4\n");
                 }
                 "waitshift" => {
                     em.out.push_str("waitshift\n");
                 }
-                "delay" => {
+                "delay" | "sleep" => {
                     let ticks = if let Some(arg) = args.get(0) {
                         eval_const_expr(arg)?
                     } else {
@@ -278,9 +281,12 @@ fn emit_stmt(stmt: &Stmt, em: &mut AsmEmitter) -> Result<(), String> {
                             let addr_p2 = em.get_or_alloc_var(&tmp_p2);
                             em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr_p2));
 
-                            // Load into er0 and er2
+                            // Load p2 into er0 then move to er2
+                            em.out.push_str(&format!("er2 = 0x{:04X}\ner0=[er2],r2 = 9,rt\n", addr_p2));
+                            em.out.push_str("er2 = er0,er0 = er2,pop er8,rt\n0x0000\n");
+
+                            // Load p1 into er0
                             em.out.push_str(&format!("er2 = 0x{:04X}\ner0=[er2],r2 = 9,rt\n", addr_p1));
-                            em.out.push_str(&format!("er4 = 0x{:04X}\ner2=[er4],r2 = 9,rt\n", addr_p2));
                         }
                     }
                     em.out.push_str("line_draw\n");
@@ -294,12 +300,24 @@ fn emit_stmt(stmt: &Stmt, em: &mut AsmEmitter) -> Result<(), String> {
                             em.out.push_str(&format!("er2 = 0x{:04X}\n", y));
                         } else {
                             em.out.push_str("# draw_pixel (dynamic)\n");
+                            // x into temp_x
                             emit_expr_to_er0(x_expr, em)?;
-                            let tmp = em.new_label("_px");
-                            let addr = em.get_or_alloc_var(&tmp);
-                            em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr));
+                            let tmp_x = em.new_label("_px");
+                            let addr_x = em.get_or_alloc_var(&tmp_x);
+                            em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr_x));
+
+                            // y into temp_y
                             emit_expr_to_er0(y_expr, em)?;
-                            em.out.push_str(&format!("er2 = er0,er4 = 0x{:04X}\ner0=[er4],r2 = 9,rt\n", addr));
+                            let tmp_y = em.new_label("_py");
+                            let addr_y = em.get_or_alloc_var(&tmp_y);
+                            em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr_y));
+
+                            // Load y into er2
+                            em.out.push_str(&format!("er2 = 0x{:04X}\ner0=[er2],r2 = 9,rt\n", addr_y));
+                            em.out.push_str("er2 = er0,er0 = er2,pop er8,rt\n0x0000\n");
+
+                            // Load x into er0
+                            em.out.push_str(&format!("er2 = 0x{:04X}\ner0=[er2],r2 = 9,rt\n", addr_x));
                         }
                     }
                     em.out.push_str("pixel_draw\n");
@@ -317,6 +335,109 @@ fn emit_stmt(stmt: &Stmt, em: &mut AsmEmitter) -> Result<(), String> {
                     };
                     em.out.push_str(&format!("er0 = 0x{:04X}\n", addr));
                     em.out.push_str("getkey\n");
+                }
+                "draw_rect" | "rect" => {
+                    if let (Some(x_e), Some(y_e), Some(w_e), Some(h_e)) = (args.get(0), args.get(1), args.get(2), args.get(3)) {
+                        if let (Ok(x), Ok(y), Ok(w), Ok(h)) = (eval_const_expr(x_e), eval_const_expr(y_e), eval_const_expr(w_e), eval_const_expr(h_e)) {
+                            let x2 = (x + w) & 0xFF;
+                            let y2 = (y + h) & 0xFF;
+                            em.out.push_str(&format!("# draw_rect ({},{},{},{})\n", x, y, w, h));
+                            em.out.push_str(&format!("xr0 = hex {:02X} {:02X} {:02X} {:02X}\nline_draw\nrender.ddd4\n", x & 0xFF, y & 0xFF, x2, y & 0xFF));
+                            em.out.push_str(&format!("xr0 = hex {:02X} {:02X} {:02X} {:02X}\nline_draw\nrender.ddd4\n", x & 0xFF, y2, x2, y2));
+                            em.out.push_str(&format!("xr0 = hex {:02X} {:02X} {:02X} {:02X}\nline_draw\nrender.ddd4\n", x & 0xFF, y & 0xFF, x & 0xFF, y2));
+                            em.out.push_str(&format!("xr0 = hex {:02X} {:02X} {:02X} {:02X}\nline_draw\nrender.ddd4\n", x2, y & 0xFF, x2, y2));
+                        } else {
+                            // Dynamic draw_rect (variables px, py)
+                            let w = eval_const_expr(w_e).unwrap_or(6);
+                            let h = eval_const_expr(h_e).unwrap_or(6);
+                            em.out.push_str(&format!("# draw_rect (dynamic px, py, {}x{})\n", w, h));
+                            emit_expr_to_er0(x_e, em)?;
+                            let tmp_x = em.new_label("_rx");
+                            let addr_x = em.get_or_alloc_var(&tmp_x);
+                            em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr_x));
+
+                            emit_expr_to_er0(y_e, em)?;
+                            let tmp_y = em.new_label("_ry");
+                            let addr_y = em.get_or_alloc_var(&tmp_y);
+                            em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr_y));
+
+                            // Top line
+                            em.out.push_str(&format!("er2 = 0x{:04X}\ner0=[er2],r2 = 9,rt\n", addr_y));
+                            em.out.push_str("er2 = er0,er0 = er2,pop er8,rt\n0x0000\n");
+                            em.out.push_str(&format!("er2 = 0x{:04X}\ner0=[er2],r2 = 9,rt\n", addr_x));
+                            em.out.push_str("line_draw\nrender.ddd4\n");
+                        }
+                    }
+                }
+                "print_at" | "draw_text" => {
+                    let text = match args.get(0) {
+                        Some(Expr::Str(s)) => s.clone(),
+                        _ => return Err("print_at expects string as first argument".into()),
+                    };
+                    let x = if let Some(arg) = args.get(1) { eval_const_expr(arg)? & 0xFF } else { 0 };
+                    let y = if let Some(arg) = args.get(2) { eval_const_expr(arg)? & 0xFF } else { 0 };
+                    let str_lbl = em.add_string_literal(&text);
+                    let packed = (y << 8) | x;
+                    em.out.push_str(&format!("# print_at \"{}\" at ({},{})\n", text, x, y));
+                    em.out.push_str(&format!("xr0 = 0x{:04X}, adr_of {}\n", packed, str_lbl));
+                    em.out.push_str("line_print\n");
+                    em.out.push_str("render.ddd4\n");
+                }
+                "print_num" | "print_dec" | "show_score" => {
+                    if let Some(val_expr) = args.get(0) {
+                        emit_expr_to_er0(val_expr, em)?;
+                    }
+                    let line = if let Some(arg) = args.get(1) { eval_const_expr(arg).unwrap_or(1) & 0xFF } else { 1 };
+                    let pad = if let Some(arg) = args.get(2) { eval_const_expr(arg).unwrap_or(0) & 0xFF } else { 0 };
+                    em.out.push_str(&format!("# print_num line=0x{:02X} pad=0x{:02X}\n", line, pad));
+                    em.out.push_str(&format!("r1 = 0x{:02X}\n", pad));
+                    em.out.push_str(&format!("er2 = 0x{:04X}\n", 0xDDD4 + (line as u32 * 24 * 8)));
+                    em.out.push_str("call 09938\n"); // hex_to_dec
+                    em.out.push_str("render.ddd4\n");
+                }
+                "is_key_pressed" | "check_key" => {
+                    em.out.push_str("# check_any_key_pressed\n");
+                    em.out.push_str("call 0E826\n");
+                }
+                "wait_key" | "pause" => {
+                    em.out.push_str("# diagnostic_wait_key\n");
+                    em.out.push_str("call 0AD92\n");
+                }
+                "mem_copy" | "memcpy" => {
+                    if let (Some(dst_e), Some(src_e), Some(len_e)) = (args.get(0), args.get(1), args.get(2)) {
+                        let dst = eval_const_expr(dst_e).unwrap_or(0xDDD4);
+                        let src = eval_const_expr(src_e).unwrap_or(0xE9E0);
+                        let len = eval_const_expr(len_e).unwrap_or(1512);
+                        em.out.push_str(&format!("qr8 = 0x{:04X}, 0x{:04X}, 0x{:04X}, 0x3030\n", dst, src, len));
+                        em.out.push_str("call 10F20\n");
+                    }
+                }
+                "mem_zero" | "memzero" => {
+                    if let (Some(addr_e), Some(len_e)) = (args.get(0), args.get(1)) {
+                        let addr = eval_const_expr(addr_e).unwrap_or(0xDDD4);
+                        let len = eval_const_expr(len_e).unwrap_or(1512);
+                        em.out.push_str(&format!("er0 = 0x{:04X}\n", addr));
+                        em.out.push_str(&format!("er2 = 0x{:04X}\n", len));
+                        em.out.push_str("call 09D34\n");
+                    }
+                }
+                "double_buffer_flip" | "flip" => {
+                    em.out.push_str("buf1_to_buf2\n");
+                    em.out.push_str("render.ddd4\n");
+                }
+                "inc" => {
+                    if let Some(Expr::Var(vname)) = args.get(0) {
+                        let addr = em.get_or_alloc_var(vname);
+                        em.out.push_str(&format!("er4 = 0x{:04X}\n", addr));
+                        em.out.push_str("[er4]+=1,rt\n");
+                    }
+                }
+                "dec" => {
+                    if let Some(Expr::Var(vname)) = args.get(0) {
+                        let addr = em.get_or_alloc_var(vname);
+                        em.out.push_str(&format!("er4 = 0x{:04X}\n", addr));
+                        em.out.push_str("[er4]-=1,rt\n");
+                    }
                 }
                 _ => {
                     // Custom / User / Raw Gadget Call
@@ -453,7 +574,7 @@ fn emit_stmt(stmt: &Stmt, em: &mut AsmEmitter) -> Result<(), String> {
     }
 }
 
-/// Emits condition evaluation and dispatch via verify_* and cmp_ea
+/// Emits condition evaluation and dispatch via verify_* and ea_dispatch
 fn emit_condition(cond: &Expr, tbl_lbl: &str, em: &mut AsmEmitter) -> Result<(), String> {
     if let Expr::BinOp(lhs, op, rhs) = cond {
         let (adr_l, adr_r) = get_pointers_for_cmp(lhs, rhs, em)?;
@@ -471,8 +592,8 @@ fn emit_condition(cond: &Expr, tbl_lbl: &str, em: &mut AsmEmitter) -> Result<(),
         em.out.push_str(&format!("xr0 = {}, {}\n", adr_l, adr_r));
         em.out.push_str(&format!("call {}\n", verify_func));
         em.out.push_str(&format!("ea = adr_of {}\n", tbl_lbl));
-        em.out.push_str("cmp_ea\n");
-        em.out.push_str("er6 = [ea]\n");
+        em.out.push_str("call 09c20\n");
+        em.out.push_str("call 1c64a\n");
         em.out.push_str("sp = er6, pop er8\n");
         Ok(())
     } else {
@@ -482,8 +603,8 @@ fn emit_condition(cond: &Expr, tbl_lbl: &str, em: &mut AsmEmitter) -> Result<(),
         em.out.push_str(&format!("xr0 = {}, adr_of {}\n", adr_l, zero_lbl));
         em.out.push_str("call 195C0\n"); // verify_ne (!= 0)
         em.out.push_str(&format!("ea = adr_of {}\n", tbl_lbl));
-        em.out.push_str("cmp_ea\n");
-        em.out.push_str("er6 = [ea]\n");
+        em.out.push_str("call 09c20\n");
+        em.out.push_str("call 1c64a\n");
         em.out.push_str("sp = er6, pop er8\n");
         Ok(())
     }
@@ -724,7 +845,7 @@ mod tests {
         assert!(asm.contains("[er8]+=er2,pop xr8"));
         assert!(asm.contains("call 19536")); // verify_eq
         assert!(asm.contains("call 19526")); // verify_lt
-        assert!(asm.contains("cmp_ea"));
+        assert!(asm.contains("ea_dispatch"));
     }
 }
 

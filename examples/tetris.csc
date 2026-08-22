@@ -1,64 +1,46 @@
-﻿model 580vnx;
-opn [E9E0];
+model 580vnx;
+opn [D730];
 
-// Game state in RAM
 u16 px at [EB40] = 88;
 u16 py at [EB42] = 6;
-u16 score at [EB44] = 0;
-u16 key at [EB46] = 0;
+u16 key at [EB44] = 0;
 
 csc main() {
     screen_del();
     px = 88;
     py = 6;
-    score = 0;
 
     game_loop:
         screen_del();
         
-        // 1. Draw Tetris Board Frame
-        draw_line(70, 4, 70, 58);
-        draw_line(112, 4, 112, 58);
-        draw_line(70, 58, 112, 58);
+        // 1. Draw Border (Left X=70, Right X=110, Floor Y=56)
+        draw_line(70, 4, 70, 56);
+        draw_line(110, 4, 110, 56);
+        draw_line(70, 56, 110, 56);
         
         // 2. Title
         print("TETRIS", 1);
         
-        // 3. User Key Input
-        get_key(key);
-        
-        // Left Key [<-] (KI/KO: 0x0440 = 1088)
-        if (key == 1088) {
-            if (px > 74) {
-                px = px - 4;
-            }
-        }
-        
-        // Right Key [->] (KI/KO: 0x0880 = 2176)
-        if (key == 2176) {
-            if (px < 104) {
-                px = px + 4;
-            }
-        }
-        
-        // 4. Gravity
+        // 4. Gravity: block falls down
         py = py + 2;
-        
-        // 5. Floor Collision
         if (py > 50) {
             py = 6;
             px = 88;
-            score = score + 10;
         }
         
-        // 6. Draw Falling Tetromino Box
-        draw_line(px, py, px + 6, py);
-        draw_line(px, py + 4, px + 6, py + 4);
-        draw_line(px, py, px, py + 4);
-        draw_line(px + 6, py, px + 6, py + 4);
+        // 5. Draw Falling Block
+        draw_pixel(px, py);
+        draw_pixel(px + 1, py);
+        draw_pixel(px + 2, py);
+        draw_pixel(px, py + 1);
+        draw_pixel(px + 1, py + 1);
+        draw_pixel(px + 2, py + 1);
+        draw_pixel(px, py + 2);
+        draw_pixel(px + 1, py + 2);
+        draw_pixel(px + 2, py + 2);
         
         render();
-        delay(120);
+        delay(100);
         
         goto game_loop;
 }
