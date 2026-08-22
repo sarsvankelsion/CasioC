@@ -12,6 +12,7 @@ pub fn emit(prog: &Program, db: &ModelDb) -> Result<(Vec<u8>, u32, String), Stri
     let mut alloc = Allocator::new(0xE800);
     let mut labels: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut patches: Vec<(usize, String)> = Vec::new();
+    let mut str_patches: Vec<(usize, Vec<u8>)> = Vec::new();
 
     for g in &prog.globals {
         let addr = g.addr.unwrap_or_else(|| alloc.alloc(&g.name, 2));
@@ -22,12 +23,34 @@ pub fn emit(prog: &Program, db: &ModelDb) -> Result<(Vec<u8>, u32, String), Stri
     for func in &prog.funcs {
         log.push_str(&format!("func {} ({} params)\n", func.name, func.params.len()));
         for stmt in &func.body {
-            emit_stmt(stmt, db, &mut out, &mut log, &mut alloc, &mut labels, &mut patches)?;
+            emit_stmt(stmt, db, &mut out, &mut log, &mut alloc, &mut labels, &mut patches, &mut str_patches)?;
+        }
+        // implicit halt: infinite loop so payload doesn't fall off stack (no need loop for hello world)
+        if !matches!(func.body.last(), Some(Stmt::Return(_)) | Some(Stmt::Goto(_))) {
+            let end_lbl = format!("csc_end_{}", func.name);
+            labels.insert(end_lbl.clone(), out.len());
+            log.push_str(&format!("{}:\n", end_lbl));
+            emit_call("pop er6", db, &mut out, &mut log)?;
+            let pos = out.len();
+            out.extend_from_slice(&[0, 0]);
+            patches.push((pos, end_lbl.clone()));
+            let _ = emit_call("sp=er6,pop er8", db, &mut out, &mut log);
+            log.push_str(&format!("  ; goto {end_lbl} (halt)\n"));
         }
     }
 
     if prog.funcs.is_empty() {
         log.push_str("warning: no csc main() found\n");
+    }
+
+    // append string pool and patch placeholders
+    for (pos, bytes) in str_patches {
+        let off = out.len();
+        out.extend_from_slice(&bytes);
+        let target = home + off as u32;
+        out[pos] = (target & 0xFF) as u8;
+        out[pos + 1] = ((target >> 8) & 0xFF) as u8;
+        log.push_str(&format!("  ; str pool {} -> [{:04X}] {} bytes\n", pos, target, bytes.len()));
     }
 
     // patch goto targets: each patch is 2-byte LE of home + label_pos
@@ -60,7 +83,7 @@ impl Allocator {
     }
 }
 
-fn emit_stmt(s: &Stmt, db: &ModelDb, out: &mut Vec<u8>, log: &mut String, alloc: &mut Allocator, labels: &mut std::collections::HashMap<String, usize>, patches: &mut Vec<(usize, String)>) -> Result<(), String> {
+fn emit_stmt(s: &Stmt, db: &ModelDb, out: &mut Vec<u8>, log: &mut String, alloc: &mut Allocator, labels: &mut std::collections::HashMap<String, usize>, patches: &mut Vec<(usize, String)>, str_patches: &mut Vec<(usize, Vec<u8>)>) -> Result<(), String> {
     match s {
         Stmt::Assign { lhs, rhs } => {
             let reg = lhs.as_str();
@@ -87,6 +110,25 @@ fn emit_stmt(s: &Stmt, db: &ModelDb, out: &mut Vec<u8>, log: &mut String, alloc:
         }
         Stmt::Call { name, args } => {
             let key = name.to_ascii_lowercase();
+            // special: print("text", x, y) -> xr0 = x, y, adr(text); call line_print
+            if key == "print" && args.len() == 3 {
+                if let Expr::Str(s) = &args[0] {
+                    let enc = crate::charset::encode_str(s).map_err(|e| e)?;
+                    let x = eval_expr(&args[1], db)?;
+                    let y = eval_expr(&args[2], db)?;
+                    // emit pop xr0
+                    emit_call("pop xr0", db, out, log)?;
+                    // xr0 = x, y, addr(placeholder)
+                    out.push((x & 0xFF) as u8);
+                    out.push((y & 0xFF) as u8);
+                    let str_pos = out.len();
+                    out.extend_from_slice(&[0, 0]); // addr placeholder
+                    str_patches.push((str_pos, enc.clone()));
+                    log.push_str(&format!("  ; print {:?} @ [{:04X}] x={} y={}\n", s, 0, x, y));
+                    emit_call("line_print", db, out, log)?;
+                    return Ok(());
+                }
+            }
             let found = stdlib_candidates(&key).iter().any(|c|
                 db.gadgets.map.contains_key(c) || db.labels.labels.contains_key(c) || db.labels.data.contains_key(c)
             );
@@ -94,10 +136,11 @@ fn emit_stmt(s: &Stmt, db: &ModelDb, out: &mut Vec<u8>, log: &mut String, alloc:
                 emit_call(&key, db, out, log)?;
                 for a in args {
                     if let Expr::Str(s) = a {
-                        match crate::charset::encode_str(s) {
-                            Ok(b) => { out.extend_from_slice(&b); log.push_str(&format!("  ; str {:?} -> {} bytes\n", s, b.len())); }
-                            Err(e) => return Err(e),
-                        }
+                        let enc = crate::charset::encode_str(s).map_err(|e| e)?;
+                        let pos = out.len();
+                        out.extend_from_slice(&[0, 0]); // placeholder for str addr
+                        str_patches.push((pos, enc.clone()));
+                        log.push_str(&format!("  ; str {:?} -> {} bytes @ placeholder {}\n", s, enc.len(), pos));
                     } else {
                         let v = eval_expr(a, db)?;
                         emit_le(v, 2, out);
@@ -121,23 +164,25 @@ fn emit_stmt(s: &Stmt, db: &ModelDb, out: &mut Vec<u8>, log: &mut String, alloc:
         Stmt::If { cond, then_b, else_b } => {
             let c = eval_cond(cond, db, out, log)?;
             if c == 0 {
-                for s in else_b { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
+                for s in else_b { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
             } else if c == 1 {
-                for s in then_b { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
+                for s in then_b { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
             } else {
                 let else_lbl = format!("else_{}", out.len());
                 let end_lbl = format!("end_{}", out.len());
                 // then
-                for s in then_b { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
+                for s in then_b { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
                 // goto end
-                patches.push((out.len(), end_lbl.clone()));
+                emit_call("pop er6", db, out, log)?;
+                let pos = out.len();
                 out.extend_from_slice(&[0, 0]); // placeholder for adr_of end
+                patches.push((pos, end_lbl.clone()));
                 log.push_str(&format!("  ; goto {end_lbl}\n"));
                 let _ = emit_call("sp=er6,pop er8", db, out, log);
                 // else label
                 labels.insert(else_lbl.clone(), out.len());
                 log.push_str(&format!("{else_lbl}:\n"));
-                for s in else_b { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
+                for s in else_b { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
                 labels.insert(end_lbl.clone(), out.len());
                 log.push_str(&format!("{end_lbl}:\n"));
             }
@@ -153,35 +198,41 @@ fn emit_stmt(s: &Stmt, db: &ModelDb, out: &mut Vec<u8>, log: &mut String, alloc:
                 log.push_str("  ; while false -> skip\n");
                 labels.insert(end_lbl.clone(), out.len());
             } else if c == 1 {
-                for s in body { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
-                patches.push((out.len(), loop_lbl.clone()));
+                for s in body { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
+                emit_call("pop er6", db, out, log)?;
+                let pos = out.len();
                 out.extend_from_slice(&[0, 0]);
+                patches.push((pos, loop_lbl.clone()));
                 let _ = emit_call("sp=er6,pop er8", db, out, log);
                 log.push_str(&format!("  ; goto {loop_lbl}\n"));
                 labels.insert(end_lbl.clone(), out.len());
                 log.push_str(&format!("{end_lbl}:\n"));
             } else {
                 // dynamic: need cmp then conditional goto (placeholder)
-                for s in body { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
-                patches.push((out.len(), loop_lbl.clone()));
+                for s in body { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
+                emit_call("pop er6", db, out, log)?;
+                let pos = out.len();
                 out.extend_from_slice(&[0, 0]);
+                patches.push((pos, loop_lbl.clone()));
                 let _ = emit_call("sp=er6,pop er8", db, out, log);
                 labels.insert(end_lbl.clone(), out.len());
             }
             Ok(())
         }
         Stmt::For { init, cond, step, body } => {
-            if let Some(s) = init { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
+            if let Some(s) = init { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
             let loop_lbl = format!("for_{}", out.len());
             let end_lbl = format!("for_end_{}", out.len());
             labels.insert(loop_lbl.clone(), out.len());
             let c = if let Some(e) = cond { eval_cond(e, db, out, log)? } else { 1 };
             let do_body = c != 0;
             if do_body {
-                for s in body { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
-                if let Some(s) = step { emit_stmt(s, db, out, log, alloc, labels, patches)?; }
-                patches.push((out.len(), loop_lbl.clone()));
+                for s in body { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
+                if let Some(s) = step { emit_stmt(s, db, out, log, alloc, labels, patches, str_patches)?; }
+                emit_call("pop er6", db, out, log)?;
+                let pos = out.len();
                 out.extend_from_slice(&[0, 0]);
+                patches.push((pos, loop_lbl.clone()));
                 let _ = emit_call("sp=er6,pop er8", db, out, log);
             }
             labels.insert(end_lbl.clone(), out.len());
@@ -189,8 +240,10 @@ fn emit_stmt(s: &Stmt, db: &ModelDb, out: &mut Vec<u8>, log: &mut String, alloc:
         }
         Stmt::Goto(lbl) => {
             log.push_str(&format!("  ; goto {lbl}\n"));
-            patches.push((out.len(), lbl.clone()));
+            emit_call("pop er6", db, out, log)?;
+            let pos = out.len();
             out.extend_from_slice(&[0, 0]); // placeholder for adr_of
+            patches.push((pos, lbl.clone()));
             let _ = emit_call("sp=er6,pop er8", db, out, log);
             Ok(())
         }
@@ -233,13 +286,6 @@ fn is_register(s: &str) -> bool {
 fn reg_size(reg: &str) -> u32 {
     let r = reg.to_ascii_lowercase();
     if r.starts_with('q') { 8 } else if r.starts_with('x') { 4 } else if r.starts_with('e') { 2 } else { 1 }
-}
-
-fn find_global_var(name: &str, _db: &ModelDb) -> Option<u32> {
-    // placeholder: globals are tracked in Program, not in db
-    // For now return None; real lookup needs Program globals table
-    let _ = name;
-    None
 }
 
 fn eval_expr(e: &Expr, db: &ModelDb) -> Result<u32, String> {
@@ -323,7 +369,7 @@ fn stdlib_candidates(name: &str) -> Vec<String> {
         "draw_line" => v.push("line_draw".into()),
         "draw_pixel" => v.push("pixel_draw".into()),
         "draw_byte" => v.push("draw_byte".into()),
-        "print" | "print_line" => { v.push("line_print".into()); v.push("printline".into()); v.push("smallprint".into()); v.push("basen_base_print".into()); }
+        "print" | "print_line" => { v.push("smallprint".into()); v.push("line_print".into()); v.push("printline".into()); v.push("basen_base_print".into()); }
         "print_hex" => v.push("hex_byte".into()),
         "render" => { v.push("render".into()); v.push("render.ddd4".into()); v.push("render.ca54".into()); v.push("render_bitmap".into()); }
         "delay" => v.push("delay".into()),

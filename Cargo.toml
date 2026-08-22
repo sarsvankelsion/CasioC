@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["casio-emu", "casio-asm", "casio-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+
+[workspace.dependencies]
+casio-emu = { path = "casio-emu" }
+casio-asm = { path = "casio-asm" }

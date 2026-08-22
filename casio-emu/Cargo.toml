@@ -1,0 +1,8 @@
+[package]
+name = "casio-emu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nX-U16 emulator core (port of CasioEmuMsvc)"
+
+[dependencies]

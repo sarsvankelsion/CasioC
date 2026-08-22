@@ -1,0 +1,10 @@
+[package]
+name = "casio-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CasioC CLI: emulator + screen + keypad"
+
+[dependencies]
+casio-emu = { workspace = true }
+casio-asm = { workspace = true }

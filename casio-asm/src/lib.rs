@@ -2,6 +2,7 @@ pub mod model;
 pub mod lexer;
 pub mod parser;
 pub mod emit;
+pub mod emit_asm;
 pub mod charset;
 pub mod npress;
 
@@ -18,4 +19,10 @@ pub fn compile_csc_with_db(source: &str, db: &ModelDb) -> Result<(Vec<u8>, u32, 
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(&tokens)?;
     emit::emit(&ast, db)
+}
+
+pub fn compile_csc_to_asm(source: &str) -> Result<String, String> {
+    let tokens = lexer::lex(source)?;
+    let ast = parser::parse(&tokens)?;
+    emit_asm::emit_asm(&ast)
 }

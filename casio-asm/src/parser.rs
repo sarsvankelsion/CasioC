@@ -245,11 +245,33 @@ fn parse_stmt(p: &mut P) -> Result<Stmt, String> {
             p.expect(&Tok::LBrace)?;
             let mut lines = Vec::new();
             while !matches!(p.peek(), Tok::RBrace | Tok::Eof) {
-                // collect until ; or }
                 let mut cur = String::new();
                 while !matches!(p.peek(), Tok::Semi | Tok::RBrace | Tok::Eof) {
                     let t = p.next();
-                    cur.push_str(&format!("{t:?} "));
+                    match t {
+                        Tok::Str(s) => {
+                            if !cur.trim().is_empty() {
+                                lines.push(cur.trim().to_string());
+                                cur.clear();
+                            }
+                            if !s.trim().is_empty() {
+                                lines.push(s.trim().to_string());
+                            }
+                        }
+                        Tok::Ident(s) => {
+                            if !cur.is_empty() { cur.push(' '); }
+                            cur.push_str(&s);
+                        }
+                        Tok::Number(n) => {
+                            if !cur.is_empty() { cur.push(' '); }
+                            cur.push_str(&format!("{}", n));
+                        }
+                        Tok::Addr(a) => {
+                            if !cur.is_empty() { cur.push(' '); }
+                            cur.push_str(&format!("[0x{:04X}]", a));
+                        }
+                        _ => {}
+                    }
                 }
                 if !cur.trim().is_empty() { lines.push(cur.trim().to_string()); }
                 p.eat(&Tok::Semi);
