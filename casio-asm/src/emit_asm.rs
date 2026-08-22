@@ -265,8 +265,22 @@ fn emit_stmt(stmt: &Stmt, em: &mut AsmEmitter) -> Result<(), String> {
                             em.out.push_str(&format!("# draw_line ({},{}) -> ({},{})\n", x1, y1, x2, y2));
                             em.out.push_str(&format!("xr0 = hex {:02X} {:02X} {:02X} {:02X}\n", x1 & 0xFF, y1 & 0xFF, x2 & 0xFF, y2 & 0xFF));
                         } else {
-                            em.out.push_str("# draw_line (params)\n");
-                            em.out.push_str("xr0 = hex 00 00 32 32\n");
+                            em.out.push_str("# draw_line (dynamic coords)\n");
+                            // er0 = x1
+                            emit_expr_to_er0(x1_e, em)?;
+                            let tmp_p1 = em.new_label("_p1");
+                            let addr_p1 = em.get_or_alloc_var(&tmp_p1);
+                            em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr_p1));
+                            
+                            // er2 = x2
+                            emit_expr_to_er0(x2_e, em)?;
+                            let tmp_p2 = em.new_label("_p2");
+                            let addr_p2 = em.get_or_alloc_var(&tmp_p2);
+                            em.out.push_str(&format!("er4 = 0x{:04X}\n[er4]=er0,pop er0,rt\n0x3030\n", addr_p2));
+
+                            // Load into er0 and er2
+                            em.out.push_str(&format!("er2 = 0x{:04X}\ner0=[er2],r2 = 9,rt\n", addr_p1));
+                            em.out.push_str(&format!("er4 = 0x{:04X}\ner2=[er4],r2 = 9,rt\n", addr_p2));
                         }
                     }
                     em.out.push_str("line_draw\n");
