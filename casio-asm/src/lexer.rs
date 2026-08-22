@@ -68,7 +68,7 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
     let mut i = 0usize;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_whitespace() {
+        if c.is_whitespace() || c == '\u{feff}' {
             i += 1;
             continue;
         }
